@@ -118,15 +118,21 @@ class AvitoCrawler:
         return base + ("?" + "&".join(params) if params else "")
 
     async def _new_context(self, browser: Browser) -> BrowserContext:
-        return await browser.new_context(
-            locale=self.settings.avito_locale,
-            timezone_id=self.settings.avito_timezone,
-            user_agent=self.settings.avito_user_agent,
-            viewport={"width": 1440, "height": 1000},
-            extra_http_headers={"Accept-Language": "ru-RU,ru;q=0.9,en;q=0.6", "DNT": "1"},
-        )
+        kwargs = {
+            "locale": self.settings.avito_locale,
+            "timezone_id": self.settings.avito_timezone,
+            "user_agent": self.settings.avito_user_agent,
+            "viewport": {"width": 1440, "height": 1000},
+            "extra_http_headers": {
+                "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.6",
+                "DNT": "1",
+            },
+        }
+        if self.settings.avito_storage_state_path.exists():
+            kwargs["storage_state"] = str(self.settings.avito_storage_state_path)
+        return await browser.new_context(**kwargs)
 
-    async def _guard_block(self, page: Page) -> None:
+    async def _is_blocked(self, page: Page) -> bool:
         text = (await page.locator("body").inner_text()).lower()
         signals = (
             "доступ ограничен",
@@ -137,17 +143,42 @@ class AvitoCrawler:
             "temporarily blocked",
             "необычная активность",
         )
-        if any(signal in text for signal in signals):
-            path = self.settings.blocked_screenshot_dir / f"avito-blocked-{int(time.time())}.png"
-            try:
-                await page.screenshot(path=str(path), full_page=True)
-            except Exception:
-                pass
+        return any(signal in text for signal in signals)
+
+    async def _save_session(self, context: BrowserContext) -> None:
+        try:
+            await context.storage_state(path=str(self.settings.avito_storage_state_path))
+        except Exception:
+            pass
+
+    async def _guard_block(self, page: Page, context: BrowserContext) -> None:
+        if not await self._is_blocked(page):
+            await self._save_session(context)
+            return
+
+        path = self.settings.blocked_screenshot_dir / f"avito-blocked-{int(time.time())}.png"
+        try:
+            await page.screenshot(path=str(path), full_page=True)
+        except Exception:
+            pass
+
+        if not self.settings.avito_headless:
+            deadline = time.monotonic() + self.settings.avito_manual_captcha_timeout_s
+            while time.monotonic() < deadline:
+                await asyncio.sleep(2)
+                if not await self._is_blocked(page):
+                    await self._save_session(context)
+                    return
             raise AvitoBlocked(
-                "Avito returned a block/CAPTCHA page. Configure AVITO_PROXY_URLS "
-                "with a Russian residential/mobile proxy or run from a Russian IP. "
-                "CAPTCHA solving is intentionally not automated."
+                "CAPTCHA осталась после ожидания. Решите её в открытом Chromium "
+                "и повторите поиск."
             )
+
+        raise AvitoBlocked(
+            "Avito показал CAPTCHA/block page. Для первого прохода установите "
+            "AVITO_HEADLESS=false, перезапустите приложение и решите CAPTCHA вручную "
+            "в открывшемся Chromium. Сессия будет сохранена в data/avito_storage_state.json."
+        )
 
     async def search(
         self,
@@ -174,7 +205,7 @@ class AvitoCrawler:
                         wait_until="domcontentloaded",
                     )
                     await self._delay()
-                    await self._guard_block(page)
+                    await self._guard_block(page, context)
                     for card in await self._extract_search_page(page, page_no):
                         result.setdefault(card.external_id, card)
                         if len(result) >= self.settings.avito_max_items:
@@ -250,7 +281,7 @@ class AvitoCrawler:
                 for card in cards[:limit]:
                     await page.goto(card.url, wait_until="domcontentloaded")
                     await self._delay()
-                    await self._guard_block(page)
+                    await self._guard_block(page, context)
                     details.append(await self._extract_details(page, card))
             finally:
                 await context.close()
