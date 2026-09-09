@@ -33,3 +33,19 @@ def test_market_estimator_finds_discount():
     assert stats.median_price >= 14500
     assert stats.discount_pct is not None and stats.discount_pct > 0.3
     assert stats.expected_profit is not None and stats.expected_profit > 4000
+
+
+def test_market_does_not_fallback_to_unrelated_same_brand_models():
+    target = card(1, 9000)
+    others = [card(2, 50000), card(3, 52000), card(4, 54000)]
+    items = [target] + others
+    features = {
+        "1": DeviceFeatures(category="laptops", brand="Lenovo", model="ThinkPad T480", canonical_name="Lenovo ThinkPad T480"),
+        "2": DeviceFeatures(category="laptops", brand="Lenovo", model="ThinkPad T14 Gen 4", canonical_name="Lenovo ThinkPad T14 Gen 4"),
+        "3": DeviceFeatures(category="laptops", brand="Lenovo", model="ThinkPad T14 Gen 4", canonical_name="Lenovo ThinkPad T14 Gen 4"),
+        "4": DeviceFeatures(category="laptops", brand="Lenovo", model="ThinkPad T14 Gen 4", canonical_name="Lenovo ThinkPad T14 Gen 4"),
+    }
+    stats = MarketEstimator(minimum_comparables=3).estimate_all(items, features)["1"]
+    assert stats.comparable_count < 3
+    assert stats.median_price is None
+    assert stats.expected_profit is None
