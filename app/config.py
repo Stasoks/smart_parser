@@ -31,10 +31,13 @@ class Settings(BaseSettings):
 
     avito_headless: bool = True
     avito_proxy_urls: str = ""
-    avito_min_delay_s: float = 1.8
-    avito_max_delay_s: float = 4.2
+    avito_min_request_interval_s: float = 15.0
+    avito_post_load_delay_s: float = 2.0
+    avito_reset_session_each_request: bool = True
+    avito_persist_session: bool = False
+    avito_block_heavy_resources: bool = True
     avito_timeout_ms: int = 45_000
-    avito_max_pages: int = 3
+    avito_max_pages: int = 2
     avito_max_items: int = 80
     avito_max_details: int = 12
     # Empty means "use the real User-Agent of bundled Chromium".
