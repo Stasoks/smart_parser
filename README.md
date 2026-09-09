@@ -4,6 +4,29 @@ AI-assisted поиск недооценённых объявлений Avito д�
 
 ## Текущий режим: fast shortlist
 
+### Low-request режим Avito
+
+По умолчанию Smart Parser делает минимум обращений к площадке:
+
+- одна страница выдачи на поиск;
+- отдельные карточки не открываются;
+- перед каждой страницей создаётся новый чистый browser context;
+- старый `data/avito_storage_state.json` удаляется;
+- cookies/localStorage между запросами не переиспользуются;
+- между двумя `page.goto()` выдерживается минимум 15 секунд, в том числе между разными запусками поиска;
+- тяжёлые ресурсы (images/media/fonts) могут блокироваться для уменьшения количества сетевых обращений.
+
+Ключевые параметры:
+
+```env
+AVITO_RESET_SESSION_EACH_REQUEST=true
+AVITO_PERSIST_SESSION=false
+AVITO_MIN_REQUEST_INTERVAL_S=15
+AVITO_BLOCK_HEAVY_RESOURCES=true
+AVITO_MAX_PAGES=2
+```
+
+
 По умолчанию приложение работает в быстром режиме: оно **не открывает отдельные карточки объявлений** и не запускает vision/web research для каждого кандидата. Поток такой:
 
 ```text
@@ -235,7 +258,10 @@ TAVILY_API_KEY=tvly-...
 | `OPENROUTER_MODEL` | текстовая модель |
 | `OPENROUTER_VISION_MODEL` | vision-модель |
 | `AVITO_PROXY_URLS` | российские прокси |
-| `AVITO_MIN_DELAY_S` / `AVITO_MAX_DELAY_S` | паузы между страницами |
+| `AVITO_MIN_REQUEST_INTERVAL_S` | минимальный интервал между навигациями Avito, по умолчанию 15 секунд |
+| `AVITO_RESET_SESSION_EACH_REQUEST` | новый чистый browser context перед каждой страницей |
+| `AVITO_PERSIST_SESSION` | сохранять cookies/storage; в low-request режиме `false` |
+| `AVITO_BLOCK_HEAVY_RESOURCES` | не загружать изображения/media/fonts для уменьшения числа запросов |
 | `AVITO_MAX_PAGES` | лимит страниц |
 | `AVITO_MAX_ITEMS` | лимит карточек |
 | `AVITO_MAX_DETAILS` | сколько полных объявлений открывать |
