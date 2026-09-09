@@ -80,9 +80,10 @@ class AvitoCrawler:
         self._proxy_cursor = 0
 
     def _choose_proxy(self) -> ProxyConfig | None:
-        if not self.settings.avito_proxy_urls:
+        proxy_urls = self.settings.avito_proxy_list
+        if not proxy_urls:
             return None
-        raw = self.settings.avito_proxy_urls[self._proxy_cursor % len(self.settings.avito_proxy_urls)]
+        raw = proxy_urls[self._proxy_cursor % len(proxy_urls)]
         self._proxy_cursor += 1
         return parse_proxy(raw)
 
