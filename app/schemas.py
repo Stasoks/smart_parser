@@ -14,7 +14,7 @@ class SearchRequest(BaseModel):
     min_price: int | None = None
     max_price: int | None = 15_000
     min_expected_profit: int = 3_000
-    pages: int = 2
+    pages: int = 1
     deep_analysis_top_n: int | None = None
     result_limit: int = 25
     custom_avito_url: str | None = None
