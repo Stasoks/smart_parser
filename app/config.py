@@ -37,13 +37,12 @@ class Settings(BaseSettings):
     avito_max_pages: int = 3
     avito_max_items: int = 80
     avito_max_details: int = 12
-    avito_user_agent: str = (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
-    )
+    # Empty means "use the real User-Agent of bundled Chromium".
+    avito_user_agent: str = ""
     avito_locale: str = "ru-RU"
     avito_timezone: str = "Europe/Moscow"
     avito_storage_state_path: Path = Path("data/avito_storage_state.json")
+    avito_hosts_log_path: Path = Path("data/avito_hosts.txt")
     avito_manual_captcha_timeout_s: int = 180
     blocked_screenshot_dir: Path = Path("data/debug")
 
@@ -60,6 +59,7 @@ class Settings(BaseSettings):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.blocked_screenshot_dir.mkdir(parents=True, exist_ok=True)
         self.avito_storage_state_path.parent.mkdir(parents=True, exist_ok=True)
+        self.avito_hosts_log_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache
