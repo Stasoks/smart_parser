@@ -170,13 +170,18 @@ def identity_key(features: DeviceFeatures) -> str:
 
 def _currency_prices(text: str) -> list[int]:
     values: list[int] = []
-    for match in re.finditer(r"(?<!\d)(\d[\d\s]{2,7})\s*(?:₽|руб(?:\.|лей)?|р\.)", text, re.I):
-        digits = re.sub(r"\D", "", match.group(1))
-        if digits:
-            value = int(digits)
-            if 500 <= value <= 10_000_000:
-                values.append(value)
-    return values
+    patterns = (
+        r"(?<!\d)(\d[\d\s]{2,7})\s*(?:₽|руб(?:\.|лей)?|р\.?)",
+        r"(?:цена|стоимость|стоит|за)\s*[:=\-]?\s*(\d[\d\s]{2,7})(?!\w)",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.I):
+            digits = re.sub(r"\D", "", match.group(1))
+            if digits:
+                value = int(digits)
+                if 500 <= value <= 10_000_000:
+                    values.append(value)
+    return list(dict.fromkeys(values))
 
 
 def _number_before(text: str, suffix_pattern: str) -> float | None:
