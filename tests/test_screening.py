@@ -45,3 +45,14 @@ def test_keeps_normal_single_device():
         )
     )
     assert not decision.rejected
+
+
+def test_rejects_hidden_higher_price_without_currency_symbol():
+    decision = screen_listing(
+        item(
+            "Lenovo ThinkPad T480",
+            5000,
+            "Цена 15000, состояние хорошее, один ноутбук",
+        )
+    )
+    assert decision.rejected
