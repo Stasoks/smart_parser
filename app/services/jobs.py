@@ -32,19 +32,20 @@ class JobManager:
         await self.update(
             job_id,
             status="error",
-            stage="error",
+            stage="Ошибка",
+            progress=1.0,
             message=str(error),
             error=str(error),
             finished_at=datetime.utcnow(),
         )
 
-    async def complete(self, job_id: str, results) -> None:
+    async def complete(self, job_id: str, results, message: str | None = None) -> None:
         await self.update(
             job_id,
             status="done",
-            stage="done",
+            stage="4/4 · Готово",
             progress=1.0,
-            message=f"Готово: {len(results)} предложений",
+            message=message or f"Готово: {len(results)} предложений",
             results=results,
             finished_at=datetime.utcnow(),
         )
