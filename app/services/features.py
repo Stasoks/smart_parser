@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 from app.schemas import ConditionFeatures, DeviceFeatures, ListingCard, ListingDetails
 
@@ -13,11 +14,98 @@ BRANDS = {
 }
 
 BROKEN_WORDS = (
-    "не включается", "не работает", "на запчасти", "разбит", "трещин", "залит", "после воды",
-    "нет матрицы", "без матрицы", "без экрана", "неисправ", "под восстановление",
+    "не включается", "не работает", "на запчасти", "запчасти", "донор", "разбор",
+    "разбит", "трещин", "залит", "после воды", "после залития", "нет матрицы",
+    "без матрицы", "без экрана", "неисправ", "под восстановление",
 )
 FAIR_WORDS = ("царапин", "потерт", "скол", "дефект", "нюанс", "менялся экран", "замена экрана")
 EXCELLENT_WORDS = ("идеальное состояние", "как новый", "как новая", "без царапин", "не пользовались")
+
+PARTS_PATTERNS = (
+    r"\bна\s+запчаст",
+    r"\bзапчаст[ьи]",
+    r"\bдонор\b",
+    r"\bразбор\b",
+    r"\bпод\s+восстанов",
+    r"\bне\s+включает",
+    r"\bнеисправ",
+    r"\bпосле\s+(?:воды|залит)",
+    r"\bбез\s+(?:матрицы|экрана|платы)",
+)
+ACCESSORY_PATTERNS = (
+    r"\bматрица\s+(?:для|на)\b",
+    r"\bклавиатура\s+(?:для|на)\b",
+    r"\bкорпус\s+(?:для|на)\b",
+    r"\bаккумулятор\s+(?:для|на)\b",
+    r"\bбатарея\s+(?:для|на)\b",
+    r"\bзарядк[аи]\s+(?:для|на)\b",
+    r"\bдисплей\s+(?:для|на)\b",
+    r"\bматеринская\s+плата\b",
+)
+BULK_PATTERNS = (
+    r"\bкуча\s+(?:ноут|телефон|планшет)",
+    r"\bмного\s+(?:ноут|телефон|планшет)",
+    r"\bноутбуки\s+(?:в\s+наличии|оптом|разные)",
+    r"\bтелефоны\s+(?:в\s+наличии|оптом|разные)",
+    r"\bпланшеты\s+(?:в\s+наличии|оптом|разные)",
+    r"\bразные\s+(?:модели|ноутбуки|телефоны|планшеты)",
+    r"\bбольшой\s+выбор\b",
+    r"\bассортимент\b",
+    r"\bоптом\b",
+)
+PRICE_TRAP_PATTERNS = (
+    r"\bцена\s+от\b",
+    r"\bцены\s+от\b",
+    r"\bстоимость\s+от\b",
+    r"\bот\s+\d[\d\s]{2,}\s*(?:₽|р\.?|руб)",
+    r"\bцена\s+(?:указана|стоит)\s+(?:за|для)\b",
+    r"\bцена\s+в\s+объявлении\b",
+    r"\bактуальн\w*\s+цен\w*\s+уточ",
+    r"\bцен\w*\s+уточня",
+    r"\bразные\s+цены\b",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class ListingScreen:
+    rejected: bool
+    reason: str = ""
+
+
+def screen_listing(listing: ListingCard | ListingDetails) -> ListingScreen:
+    """Reject obvious parts, bulk catalogues and misleading teaser-price listings."""
+    if listing.price is None or listing.price <= 0:
+        return ListingScreen(True, "нет нормальной цены")
+
+    text = f"{listing.title} {getattr(listing, 'snippet', '')} {getattr(listing, 'description', '')}".lower()
+    text = re.sub(r"\s+", " ", text)
+
+    for pattern in PARTS_PATTERNS:
+        if re.search(pattern, text, re.I):
+            return ListingScreen(True, "запчасти/неисправное устройство")
+
+    for pattern in ACCESSORY_PATTERNS:
+        if re.search(pattern, text, re.I):
+            return ListingScreen(True, "комплектующая, а не устройство")
+
+    for pattern in BULK_PATTERNS:
+        if re.search(pattern, text, re.I):
+            return ListingScreen(True, "опт/несколько устройств")
+
+    for pattern in PRICE_TRAP_PATTERNS:
+        if re.search(pattern, text, re.I):
+            return ListingScreen(True, "цена-приманка или цена «от»")
+
+    currency_prices = _currency_prices(text)
+    if len(currency_prices) >= 3:
+        return ListingScreen(True, "в объявлении несколько товаров/цен")
+
+    if currency_prices:
+        higher = [value for value in currency_prices if value >= listing.price * 1.45 and value - listing.price >= 2500]
+        if higher:
+            return ListingScreen(True, "в тексте указана существенно более высокая реальная цена")
+
+    return ListingScreen(False)
 
 
 def local_extract_device(listing: ListingCard | ListingDetails, category: str = "other") -> DeviceFeatures:
@@ -78,6 +166,17 @@ def identity_key(features: DeviceFeatures) -> str:
     canonical = (features.canonical_name or f"{features.brand} {features.model}").lower().strip()
     canonical = re.sub(r"[^a-zа-я0-9]+", " ", canonical)
     return re.sub(r"\s+", " ", canonical).strip()
+
+
+def _currency_prices(text: str) -> list[int]:
+    values: list[int] = []
+    for match in re.finditer(r"(?<!\d)(\d[\d\s]{2,7})\s*(?:₽|руб(?:\.|лей)?|р\.)", text, re.I):
+        digits = re.sub(r"\D", "", match.group(1))
+        if digits:
+            value = int(digits)
+            if 500 <= value <= 10_000_000:
+                values.append(value)
+    return values
 
 
 def _number_before(text: str, suffix_pattern: str) -> float | None:
