@@ -4,7 +4,6 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,7 +30,7 @@ class Settings(BaseSettings):
     web_search_max_results: int = 5
 
     avito_headless: bool = True
-    avito_proxy_urls: list[str] = Field(default_factory=list)
+    avito_proxy_urls: str = ""
     avito_min_delay_s: float = 1.8
     avito_max_delay_s: float = 4.2
     avito_timeout_ms: int = 45_000
@@ -51,14 +50,9 @@ class Settings(BaseSettings):
     llm_batch_size: int = 12
     minimum_comparables: int = 3
 
-    @field_validator("avito_proxy_urls", mode="before")
-    @classmethod
-    def split_proxy_urls(cls, value):
-        if value is None or value == "":
-            return []
-        if isinstance(value, str):
-            return [part.strip() for part in value.split(",") if part.strip()]
-        return value
+    @property
+    def avito_proxy_list(self) -> list[str]:
+        return [part.strip() for part in self.avito_proxy_urls.split(",") if part.strip()]
 
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
