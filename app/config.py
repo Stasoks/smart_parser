@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     )
     avito_locale: str = "ru-RU"
     avito_timezone: str = "Europe/Moscow"
+    avito_storage_state_path: Path = Path("data/avito_storage_state.json")
+    avito_manual_captcha_timeout_s: int = 180
     blocked_screenshot_dir: Path = Path("data/debug")
 
     deep_analysis_top_n: int = 10
@@ -57,6 +59,7 @@ class Settings(BaseSettings):
     def ensure_dirs(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.blocked_screenshot_dir.mkdir(parents=True, exist_ok=True)
+        self.avito_storage_state_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 @lru_cache
