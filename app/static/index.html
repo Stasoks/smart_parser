@@ -11,8 +11,8 @@
     <header>
       <div>
         <div class="eyebrow">SMART PARSER</div>
-        <h1>Поиск недооценённой техники на Avito</h1>
-        <p>Рынок, feature map, vision-анализ, web research и ожидаемая маржа в одном интерфейсе.</p>
+        <h1>Выгодные объявления Avito</h1>
+        <p>Быстрый поиск без открытия каждой карточки: отсев мусора, сравнение цен и готовые ссылки.</p>
       </div>
       <div id="health" class="pill">Проверяю конфигурацию…</div>
     </header>
@@ -21,7 +21,7 @@
       <form id="search-form">
         <label class="field wide">
           <span>Что ищем</span>
-          <textarea id="prompt" rows="3" placeholder="Ноутбуки до 15к с маржой от 4к, ThinkPad/Dell/HP, без серьёзного ремонта"></textarea>
+          <textarea id="prompt" rows="3" placeholder="Ноутбуки до 15к с маржой от 4к, ThinkPad/Dell/HP, не запчасти и не опт"></textarea>
         </label>
         <div class="grid">
           <label class="field"><span>Категория</span>
@@ -41,33 +41,36 @@
             </select>
           </label>
           <label class="field"><span>Цена до, ₽</span><input id="max-price" type="number" value="15000"></label>
-          <label class="field"><span>Целевая маржа, ₽</span><input id="min-profit" type="number" value="3000"></label>
-          <label class="field"><span>Страниц</span><input id="pages" type="number" min="1" max="6" value="2"></label>
-          <label class="field"><span>Глубоко проверить</span><input id="deep-n" type="number" min="1" max="30" value="10"></label>
+          <label class="field"><span>Минимальная маржа, ₽</span><input id="min-profit" type="number" value="3000"></label>
+          <label class="field"><span>Страниц Avito</span><input id="pages" type="number" min="1" max="6" value="2"></label>
+          <label class="field"><span>Сколько ссылок показать</span><input id="result-limit" type="number" min="1" max="100" value="25"></label>
         </div>
         <details>
-          <summary>Расширенные настройки</summary>
-          <label class="field wide"><span>Готовая Avito-ссылка</span><input id="custom-url" type="url"></label>
-          <label class="check"><input id="vision" type="checkbox" checked> Vision-анализ фото</label>
-          <label class="check"><input id="web-research" type="checkbox" checked> Дополнительный поиск в интернете</label>
+          <summary>Готовая ссылка Avito вместо автоматических фильтров</summary>
+          <label class="field wide"><span>Avito URL</span><input id="custom-url" type="url"></label>
         </details>
-        <button id="submit" type="submit">Найти выгодные предложения</button>
+        <button id="submit" type="submit">Найти предложения</button>
       </form>
     </section>
 
     <section id="progress" class="panel hidden">
-      <div class="row"><div><b id="stage">QUEUED</b><div id="message"></div></div><strong id="percent">0%</strong></div>
+      <div class="row">
+        <div>
+          <b id="stage">Ожидание</b>
+          <div id="message"></div>
+        </div>
+        <strong id="percent">0%</strong>
+      </div>
       <div class="track"><div id="bar"></div></div>
       <div id="spec" class="muted"></div>
     </section>
 
     <section id="results-section" class="hidden">
-      <div class="row"><h2>Лучшие сделки</h2><div id="count" class="pill"></div></div>
-      <div id="results"></div>
+      <div class="row"><h2>Подходящие объявления</h2><div id="count" class="pill"></div></div>
+      <div id="results" class="link-list"></div>
     </section>
   </main>
 
-  <dialog id="modal"><button id="close">Закрыть</button><pre id="modal-body"></pre></dialog>
   <script src="/static/app.js"></script>
 </body>
 </html>
