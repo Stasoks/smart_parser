@@ -16,9 +16,10 @@ class SearchRequest(BaseModel):
     min_expected_profit: int = 3_000
     pages: int = 2
     deep_analysis_top_n: int | None = None
+    result_limit: int = 25
     custom_avito_url: str | None = None
-    enable_web_research: bool = True
-    enable_vision: bool = True
+    enable_web_research: bool = False
+    enable_vision: bool = False
 
 
 class NormalizedSearchSpec(BaseModel):
