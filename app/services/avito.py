@@ -78,6 +78,7 @@ class AvitoCrawler:
     def __init__(self, settings: Settings):
         self.settings = settings
         self._proxy_cursor = 0
+        self._seen_hosts: set[str] = set()
 
     def _choose_proxy(self) -> ProxyConfig | None:
         proxy_urls = self.settings.avito_proxy_list
@@ -121,20 +122,45 @@ class AvitoCrawler:
         kwargs = {
             "locale": self.settings.avito_locale,
             "timezone_id": self.settings.avito_timezone,
-            "user_agent": self.settings.avito_user_agent,
             "viewport": {"width": 1440, "height": 1000},
             "extra_http_headers": {
                 "Accept-Language": "ru-RU,ru;q=0.9,en;q=0.6",
                 "DNT": "1",
             },
         }
+        if self.settings.avito_user_agent:
+            kwargs["user_agent"] = self.settings.avito_user_agent
         if self.settings.avito_storage_state_path.exists():
             kwargs["storage_state"] = str(self.settings.avito_storage_state_path)
         return await browser.new_context(**kwargs)
 
-    async def _is_blocked(self, page: Page) -> bool:
-        text = (await page.locator("body").inner_text()).lower()
-        signals = (
+    def _track_page_hosts(self, page: Page) -> None:
+        def on_request(request) -> None:
+            try:
+                host = urlparse(request.url).hostname
+                if host:
+                    self._seen_hosts.add(host)
+            except Exception:
+                pass
+
+        page.on("request", on_request)
+
+    def _save_seen_hosts(self) -> None:
+        try:
+            self.settings.avito_hosts_log_path.write_text(
+                "\n".join(sorted(self._seen_hosts)) + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    async def _page_state(self, page: Page) -> str:
+        try:
+            text = (await page.locator("body").inner_text()).lower()
+        except Exception:
+            return "navigating"
+
+        blocked_signals = (
             "доступ ограничен",
             "подозрительная активность",
             "пройдите проверку",
@@ -143,7 +169,20 @@ class AvitoCrawler:
             "temporarily blocked",
             "необычная активность",
         )
-        return any(signal in text for signal in signals)
+        redirect_signals = (
+            "перенаправляем",
+            "перенаправление",
+            "redirecting",
+        )
+        if any(signal in text for signal in blocked_signals):
+            return "blocked"
+        if any(signal in text for signal in redirect_signals):
+            return "redirecting"
+
+        host = urlparse(page.url).hostname or ""
+        if host.endswith("avito.ru") and len(text.strip()) > 300:
+            return "ready"
+        return "navigating"
 
     async def _save_session(self, context: BrowserContext) -> None:
         try:
@@ -152,32 +191,42 @@ class AvitoCrawler:
             pass
 
     async def _guard_block(self, page: Page, context: BrowserContext) -> None:
-        if not await self._is_blocked(page):
+        state = await self._page_state(page)
+        if state == "ready":
             await self._save_session(context)
             return
 
-        path = self.settings.blocked_screenshot_dir / f"avito-blocked-{int(time.time())}.png"
-        try:
-            await page.screenshot(path=str(path), full_page=True)
-        except Exception:
-            pass
+        if state == "blocked":
+            path = self.settings.blocked_screenshot_dir / f"avito-blocked-{int(time.time())}.png"
+            try:
+                await page.screenshot(path=str(path), full_page=True)
+            except Exception:
+                pass
 
-        if not self.settings.avito_headless:
-            deadline = time.monotonic() + self.settings.avito_manual_captcha_timeout_s
-            while time.monotonic() < deadline:
-                await asyncio.sleep(2)
-                if not await self._is_blocked(page):
-                    await self._save_session(context)
-                    return
+        if self.settings.avito_headless:
             raise AvitoBlocked(
-                "CAPTCHA осталась после ожидания. Решите её в открытом Chromium "
-                "и повторите поиск."
+                "Avito показал CAPTCHA/block page. Для первого прохода установите "
+                "AVITO_HEADLESS=false, перезапустите приложение и решите CAPTCHA вручную "
+                "в открывшемся Chromium. Сессия будет сохранена в data/avito_storage_state.json."
             )
 
+        deadline = time.monotonic() + self.settings.avito_manual_captcha_timeout_s
+        consecutive_ready = 0
+        while time.monotonic() < deadline:
+            await asyncio.sleep(2)
+            state = await self._page_state(page)
+            if state == "ready":
+                consecutive_ready += 1
+                if consecutive_ready >= 3:
+                    await self._save_session(context)
+                    return
+            else:
+                consecutive_ready = 0
+
+        self._save_seen_hosts()
         raise AvitoBlocked(
-            "Avito показал CAPTCHA/block page. Для первого прохода установите "
-            "AVITO_HEADLESS=false, перезапустите приложение и решите CAPTCHA вручную "
-            "в открывшемся Chromium. Сессия будет сохранена в data/avito_storage_state.json."
+            "Avito не завершил проверку: CAPTCHA/redirect продолжаются или снова появился "
+            "'Доступ ограничен'. Хосты текущей сессии сохранены в data/avito_hosts.txt."
         )
 
     async def search(
@@ -197,6 +246,7 @@ class AvitoCrawler:
             )
             context = await self._new_context(browser)
             page = await context.new_page()
+            self._track_page_hosts(page)
             page.set_default_timeout(self.settings.avito_timeout_ms)
             try:
                 for page_no in range(1, pages + 1):
@@ -211,6 +261,7 @@ class AvitoCrawler:
                         if len(result) >= self.settings.avito_max_items:
                             return list(result.values())
             finally:
+                self._save_seen_hosts()
                 await context.close()
                 await browser.close()
         return list(result.values())
@@ -284,6 +335,7 @@ class AvitoCrawler:
                     await self._guard_block(page, context)
                     details.append(await self._extract_details(page, card))
             finally:
+                self._save_seen_hosts()
                 await context.close()
                 await browser.close()
         return details
