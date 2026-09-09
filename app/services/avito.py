@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import random
 import re
 import time
 from dataclasses import dataclass
@@ -79,6 +78,8 @@ class AvitoCrawler:
         self.settings = settings
         self._proxy_cursor = 0
         self._seen_hosts: set[str] = set()
+        self._request_lock = asyncio.Lock()
+        self._last_navigation_at = 0.0
 
     def _choose_proxy(self) -> ProxyConfig | None:
         proxy_urls = self.settings.avito_proxy_list
@@ -88,10 +89,27 @@ class AvitoCrawler:
         self._proxy_cursor += 1
         return parse_proxy(raw)
 
-    async def _delay(self) -> None:
-        await asyncio.sleep(
-            random.uniform(self.settings.avito_min_delay_s, self.settings.avito_max_delay_s)
-        )
+    async def _wait_for_request_slot(self) -> None:
+        elapsed = time.monotonic() - self._last_navigation_at
+        wait_for = self.settings.avito_min_request_interval_s - elapsed
+        if wait_for > 0:
+            await asyncio.sleep(wait_for)
+
+    async def _navigate(self, page: Page, url: str) -> None:
+        async with self._request_lock:
+            await self._wait_for_request_slot()
+            await page.goto(url, wait_until="domcontentloaded")
+            self._last_navigation_at = time.monotonic()
+        if self.settings.avito_post_load_delay_s > 0:
+            await asyncio.sleep(self.settings.avito_post_load_delay_s)
+
+    def _reset_saved_session(self) -> None:
+        if not self.settings.avito_reset_session_each_request:
+            return
+        try:
+            self.settings.avito_storage_state_path.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     def build_search_url(
         self,
@@ -130,9 +148,21 @@ class AvitoCrawler:
         }
         if self.settings.avito_user_agent:
             kwargs["user_agent"] = self.settings.avito_user_agent
-        if self.settings.avito_storage_state_path.exists():
+        if (
+            self.settings.avito_persist_session
+            and not self.settings.avito_reset_session_each_request
+            and self.settings.avito_storage_state_path.exists()
+        ):
             kwargs["storage_state"] = str(self.settings.avito_storage_state_path)
-        return await browser.new_context(**kwargs)
+        context = await browser.new_context(**kwargs)
+        if self.settings.avito_block_heavy_resources:
+            async def block_heavy(route):
+                if route.request.resource_type in {"image", "media", "font"}:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            await context.route("**/*", block_heavy)
+        return context
 
     def _track_page_hosts(self, page: Page) -> None:
         def on_request(request) -> None:
@@ -185,6 +215,8 @@ class AvitoCrawler:
         return "navigating"
 
     async def _save_session(self, context: BrowserContext) -> None:
+        if not self.settings.avito_persist_session:
+            return
         try:
             await context.storage_state(path=str(self.settings.avito_storage_state_path))
         except Exception:
@@ -205,9 +237,9 @@ class AvitoCrawler:
 
         if self.settings.avito_headless:
             raise AvitoBlocked(
-                "Avito показал CAPTCHA/block page. Для первого прохода установите "
-                "AVITO_HEADLESS=false, перезапустите приложение и решите CAPTCHA вручную "
-                "в открывшемся Chromium. Сессия будет сохранена в data/avito_storage_state.json."
+                "Avito показал CAPTCHA/block page. Установите AVITO_HEADLESS=false и "
+                "при необходимости решите CAPTCHA вручную в открывшемся Chromium. "
+                "В low-request режиме сессия после запроса не сохраняется."
             )
 
         deadline = time.monotonic() + self.settings.avito_manual_captcha_timeout_s
@@ -239,37 +271,41 @@ class AvitoCrawler:
         pages = min(max(1, pages), self.settings.avito_max_pages)
         result: dict[str, ListingCard] = {}
         proxy = self._choose_proxy()
+
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(
                 headless=self.settings.avito_headless,
                 proxy=proxy.playwright() if proxy else None,
                 args=["--disable-dev-shm-usage"],
             )
-            context = await self._new_context(browser)
-            page = await context.new_page()
-            self._track_page_hosts(page)
-            page.set_default_timeout(self.settings.avito_timeout_ms)
             try:
                 for page_no in range(1, pages + 1):
-                    await page.goto(
-                        self.build_search_url(spec, page_no, custom_url),
-                        wait_until="domcontentloaded",
-                    )
-                    await self._delay()
-                    await self._guard_block(page, context)
-                    page_cards = await self._extract_search_page(page, page_no)
-                    for card in page_cards:
-                        result.setdefault(card.external_id, card)
-                        if len(result) >= self.settings.avito_max_items:
-                            if progress_callback:
-                                await progress_callback(page_no, pages, len(result))
-                            return list(result.values())
-                    if progress_callback:
-                        await progress_callback(page_no, pages, len(result))
+                    self._reset_saved_session()
+                    context = await self._new_context(browser)
+                    page = await context.new_page()
+                    self._track_page_hosts(page)
+                    page.set_default_timeout(self.settings.avito_timeout_ms)
+                    try:
+                        await self._navigate(
+                            page,
+                            self.build_search_url(spec, page_no, custom_url),
+                        )
+                        await self._guard_block(page, context)
+                        page_cards = await self._extract_search_page(page, page_no)
+                        for card in page_cards:
+                            result.setdefault(card.external_id, card)
+                            if len(result) >= self.settings.avito_max_items:
+                                if progress_callback:
+                                    await progress_callback(page_no, pages, len(result))
+                                return list(result.values())
+                        if progress_callback:
+                            await progress_callback(page_no, pages, len(result))
+                    finally:
+                        self._save_seen_hosts()
+                        await context.close()
             finally:
-                self._save_seen_hosts()
-                await context.close()
                 await browser.close()
+
         return list(result.values())
 
     async def _extract_search_page(self, page: Page, page_no: int) -> list[ListingCard]:
@@ -336,8 +372,7 @@ class AvitoCrawler:
             page.set_default_timeout(self.settings.avito_timeout_ms)
             try:
                 for card in cards[:limit]:
-                    await page.goto(card.url, wait_until="domcontentloaded")
-                    await self._delay()
+                    await self._navigate(page, card.url)
                     await self._guard_block(page, context)
                     details.append(await self._extract_details(page, card))
             finally:
