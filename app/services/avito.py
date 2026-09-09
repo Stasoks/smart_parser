@@ -234,6 +234,7 @@ class AvitoCrawler:
         spec: NormalizedSearchSpec,
         pages: int,
         custom_url: str | None = None,
+        progress_callback=None,
     ) -> list[ListingCard]:
         pages = min(max(1, pages), self.settings.avito_max_pages)
         result: dict[str, ListingCard] = {}
@@ -256,10 +257,15 @@ class AvitoCrawler:
                     )
                     await self._delay()
                     await self._guard_block(page, context)
-                    for card in await self._extract_search_page(page, page_no):
+                    page_cards = await self._extract_search_page(page, page_no)
+                    for card in page_cards:
                         result.setdefault(card.external_id, card)
                         if len(result) >= self.settings.avito_max_items:
+                            if progress_callback:
+                                await progress_callback(page_no, pages, len(result))
                             return list(result.values())
+                    if progress_callback:
+                        await progress_callback(page_no, pages, len(result))
             finally:
                 self._save_seen_hosts()
                 await context.close()
