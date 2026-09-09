@@ -1,27 +1,29 @@
 from __future__ import annotations
 
-import asyncio
-
 from sqlmodel import Session
 
 from app.config import Settings
 from app.db import SavedListing, SearchRun, engine
-from app.schemas import FeatureMap, ListingDetails, SearchRequest
+from app.schemas import DealAnalysis, FeatureMap, ListingDetails, SearchRequest
 from app.services.avito import AvitoCrawler
-from app.services.features import local_extract_condition, local_extract_device
+from app.services.features import (
+    local_extract_condition,
+    local_extract_device,
+    screen_listing,
+)
 from app.services.jobs import JobManager
 from app.services.market import MarketEstimator
 from app.services.openrouter import OpenRouterService
-from app.services.web_search import WebSearchService
 
 
 class DealPipeline:
+    """Fast shortlist pipeline: search cards -> local filtering -> market ranking -> links."""
+
     def __init__(self, settings: Settings, jobs: JobManager):
         self.settings = settings
         self.jobs = jobs
         self.avito = AvitoCrawler(settings)
         self.ai = OpenRouterService(settings)
-        self.web = WebSearchService(settings)
         self.market = MarketEstimator(settings.minimum_comparables)
 
     async def run(self, job_id: str, request: SearchRequest) -> None:
@@ -29,103 +31,123 @@ class DealPipeline:
             await self.jobs.update(
                 job_id,
                 status="running",
-                stage="interpret",
+                stage="1/4 · Запрос",
                 progress=0.03,
-                message="Разбираю запрос",
+                message="Разбираю условия поиска. Это один запрос к OpenRouter.",
             )
             spec = await self.ai.interpret_search(request)
-            await self.jobs.update(job_id, search_spec=spec)
+            await self.jobs.update(job_id, search_spec=spec, progress=0.08)
             self._save_run(job_id, request.prompt, spec.model_dump_json(), "running")
+
+            async def scrape_progress(page_no: int, pages: int, found: int) -> None:
+                fraction = page_no / max(1, pages)
+                await self.jobs.update(
+                    job_id,
+                    stage="2/4 · Avito",
+                    progress=0.10 + 0.42 * fraction,
+                    message=f"Страница {page_no}/{pages} · найдено {found} объявлений",
+                )
 
             await self.jobs.update(
                 job_id,
-                stage="scrape",
-                progress=0.08,
-                message="Собираю объявления Avito",
+                stage="2/4 · Avito",
+                progress=0.10,
+                message=f"Загружаю страницы Avito: 0/{request.pages}",
             )
             cards = await self.avito.search(
                 spec,
                 pages=request.pages,
                 custom_url=request.custom_avito_url,
+                progress_callback=scrape_progress,
             )
             if not cards:
                 raise RuntimeError(
-                    "Avito не вернул объявления. Проверьте фильтры и доступ с текущего IP."
+                    "Avito не вернул объявления. Проверьте фильтры, CAPTCHA и маршрут до Avito."
                 )
+
+            total = len(cards)
+            await self.jobs.update(
+                job_id,
+                stage="3/4 · Фильтрация",
+                progress=0.55,
+                message=f"Проверяю мусорные объявления: 0/{total}",
+            )
+
+            clean_cards = []
+            device_map = {}
+            condition_map = {}
+            rejected_reasons: dict[str, int] = {}
+
+            for index, card in enumerate(cards, start=1):
+                decision = screen_listing(card)
+                if decision.rejected:
+                    rejected_reasons[decision.reason] = rejected_reasons.get(decision.reason, 0) + 1
+                else:
+                    clean_cards.append(card)
+                    device_map[card.external_id] = local_extract_device(card, spec.category)
+                    condition_map[card.external_id] = local_extract_condition(card)
+
+                if index == total or index % 10 == 0:
+                    await self.jobs.update(
+                        job_id,
+                        progress=0.55 + 0.13 * (index / total),
+                        message=(
+                            f"Проверено {index}/{total} · "
+                            f"оставлено {len(clean_cards)} · отсеяно {index - len(clean_cards)}"
+                        ),
+                    )
+
+            if not clean_cards:
+                rejected = ", ".join(f"{k}: {v}" for k, v in rejected_reasons.items())
+                raise RuntimeError(f"После фильтрации не осталось объявлений. {rejected}")
 
             await self.jobs.update(
                 job_id,
-                stage="normalize",
-                progress=0.28,
-                message=f"Нормализую {len(cards)} объявлений",
+                stage="4/4 · Сравнение цен",
+                progress=0.72,
+                message=f"Сравниваю цены {len(clean_cards)} нормальных объявлений",
             )
-            normalized = await self._normalize(cards, spec.category)
-            device_map = {k: v[0] for k, v in normalized.items()}
-            condition_map = {k: v[1] for k, v in normalized.items()}
-            market_map = self.market.estimate_all(cards, device_map)
+            market_map = self.market.estimate_all(clean_cards, device_map)
 
-            ranked_cards = sorted(
-                cards,
-                key=lambda x: self._pre_score(
-                    market_map[x.external_id],
-                    condition_map[x.external_id],
-                ),
-                reverse=True,
-            )
+            candidates = []
+            for card in clean_cards:
+                market = market_map[card.external_id]
+                condition = condition_map[card.external_id]
+                if market.comparable_count < self.settings.minimum_comparables:
+                    continue
+                if market.expected_profit is None or market.expected_profit < spec.min_expected_profit:
+                    continue
+                if market.discount_pct is None or market.discount_pct < 0.10:
+                    continue
+                if market.confidence < 0.35:
+                    continue
 
-            deep_n = min(
-                request.deep_analysis_top_n or self.settings.deep_analysis_top_n,
-                self.settings.avito_max_details,
-                len(ranked_cards),
-            )
-            await self.jobs.update(
-                job_id,
-                stage="details",
-                progress=0.42,
-                message=f"Открываю {deep_n} лучших объявлений",
-            )
-            details_list = await self.avito.enrich(ranked_cards[:deep_n], limit=deep_n)
-            details_by_id = {x.external_id: x for x in details_list}
-
-            if details_list:
-                detail_normalized = await self._normalize(details_list, spec.category)
-                normalized.update(detail_normalized)
-                device_map.update({k: v[0] for k, v in detail_normalized.items()})
-                condition_map.update({k: v[1] for k, v in detail_normalized.items()})
-                market_map = self.market.estimate_all(cards, device_map)
-
-            feature_maps: list[FeatureMap] = []
-            for card in ranked_cards[: max(deep_n, min(30, len(ranked_cards)))]:
-                listing = details_by_id.get(card.external_id) or ListingDetails(
-                    **card.model_dump()
+                score = self._pre_score(market, condition)
+                analysis = DealAnalysis(
+                    fair_price=market.median_price,
+                    expected_sale_price=market.expected_resale_price,
+                    expected_profit=market.expected_profit,
+                    deal_score=round(max(0.0, min(100.0, score)), 1),
+                    confidence=market.confidence,
+                    liquidity_score=0.5,
+                    risk_flags=list(condition.defects),
+                    positives=[
+                        f"дисконт {round((market.discount_pct or 0) * 100)}%",
+                        f"{market.comparable_count} похожих объявлений",
+                    ],
+                    summary=self._short_summary(card, device_map[card.external_id], market),
                 )
-                feature_maps.append(
+                candidates.append(
                     FeatureMap(
-                        listing=listing,
+                        listing=ListingDetails(**card.model_dump()),
                         device=device_map[card.external_id],
-                        condition=condition_map[card.external_id],
-                        market=market_map[card.external_id],
+                        condition=condition,
+                        market=market,
+                        analysis=analysis,
                     )
                 )
 
-            await self.jobs.update(
-                job_id,
-                stage="vision",
-                progress=0.56,
-                message="Проверяю фотографии лучших кандидатов",
-            )
-            if request.enable_vision and self.ai.enabled:
-                await self._vision(feature_maps[:deep_n])
-
-            await self.jobs.update(
-                job_id,
-                stage="analysis",
-                progress=0.68,
-                message="Оцениваю маржу, риски и ликвидность",
-            )
-            await self._analyze(feature_maps, request.enable_web_research)
-
-            feature_maps.sort(
+            candidates.sort(
                 key=lambda fm: (
                     fm.analysis.deal_score if fm.analysis else 0,
                     fm.analysis.expected_profit
@@ -134,121 +156,83 @@ class DealPipeline:
                 ),
                 reverse=True,
             )
-            self._save_results(job_id, feature_maps)
+            result_limit = max(1, min(request.result_limit, 100))
+            results = candidates[:result_limit]
+
+            rejected_total = total - len(clean_cards)
+            await self.jobs.update(
+                job_id,
+                stage="4/4 · Готово",
+                progress=0.98,
+                message=(
+                    f"Найдено {len(results)} подходящих · "
+                    f"мусорных объявлений отсеяно {rejected_total} · "
+                    f"полные карточки не открывались"
+                ),
+            )
+
+            self._save_results(job_id, results)
             self._save_run(
                 job_id,
                 request.prompt,
                 spec.model_dump_json(),
                 "done",
-                len(feature_maps),
+                len(results),
             )
-            await self.jobs.complete(job_id, feature_maps)
+            await self.jobs.complete(
+                job_id,
+                results,
+                message=(
+                    f"Готово: {len(results)} ссылок. "
+                    f"Проверено {total}, отсеяно {rejected_total}."
+                ),
+            )
         except Exception as exc:
             self._save_run(job_id, request.prompt, "", "error", error=str(exc))
             await self.jobs.fail(job_id, exc)
 
-    async def _normalize(self, listings, category: str):
-        output = {}
-        size = max(1, self.settings.llm_batch_size)
-        for start in range(0, len(listings), size):
-            batch = listings[start:start + size]
-            output.update(await self.ai.normalize_batch(batch, category))
-        for item in listings:
-            output.setdefault(
-                item.external_id,
-                (
-                    local_extract_device(item, category),
-                    local_extract_condition(item),
-                ),
+    @staticmethod
+    def _short_summary(card, device, market) -> str:
+        parts = []
+        if device.canonical_name:
+            parts.append(device.canonical_name)
+        if device.cpu:
+            parts.append(device.cpu)
+        specs = []
+        if device.ram_gb:
+            specs.append(f"{device.ram_gb:g} ГБ RAM")
+        if device.storage_gb:
+            specs.append(f"{device.storage_gb:g} ГБ {device.storage_type}".strip())
+        if specs:
+            parts.append(", ".join(specs))
+        if market.median_price:
+            parts.append(
+                f"медиана похожих ~{round(market.median_price):,} ₽".replace(",", " ")
             )
-        return output
-
-    async def _vision(self, feature_maps: list[FeatureMap]) -> None:
-        semaphore = asyncio.Semaphore(3)
-
-        async def one(fm: FeatureMap):
-            async with semaphore:
-                fm.vision = await self.ai.vision_assess(fm.listing)
-                if fm.vision and fm.vision.visible_defects:
-                    fm.condition.defects = list(
-                        dict.fromkeys(fm.condition.defects + fm.vision.visible_defects)
-                    )
-                    fm.condition.repair_risk = max(
-                        fm.condition.repair_risk,
-                        min(0.95, 0.35 + 0.08 * len(fm.vision.visible_defects)),
-                    )
-
-        await asyncio.gather(*(one(fm) for fm in feature_maps))
-
-    async def _analyze(
-        self,
-        feature_maps: list[FeatureMap],
-        enable_web_research: bool,
-    ) -> None:
-        semaphore = asyncio.Semaphore(4)
-
-        async def one(fm: FeatureMap):
-            async with semaphore:
-                fm.analysis = await self.ai.analyze_deal(fm)
-                if (
-                    enable_web_research
-                    and fm.analysis.research_needed
-                    and fm.analysis.research_queries
-                    and self.settings.web_search_provider != "disabled"
-                ):
-                    fm.web_evidence = await self.web.multi_search(
-                        fm.analysis.research_queries,
-                        max_results_each=3,
-                    )
-                    if fm.web_evidence:
-                        fm.analysis = await self.ai.analyze_deal(fm)
-                self._apply_guardrails(fm)
-
-        await asyncio.gather(*(one(fm) for fm in feature_maps))
-
-    def _apply_guardrails(self, fm: FeatureMap) -> None:
-        if fm.analysis is None:
-            return
-        price = fm.listing.price or 0
-        if fm.condition.state == "broken" or fm.condition.repair_risk >= 0.85:
-            fm.analysis.deal_score = min(fm.analysis.deal_score, 38.0)
-            fm.analysis.risk_flags = list(
-                dict.fromkeys(
-                    fm.analysis.risk_flags
-                    + ["Высокий риск ремонта/неисправности"]
-                )
+        if market.discount_pct is not None:
+            parts.append(f"ниже рынка примерно на {round(market.discount_pct * 100)}%")
+        if market.expected_profit is not None:
+            parts.append(
+                f"ожидаемая маржа ~{round(market.expected_profit):,} ₽".replace(",", " ")
             )
-        if fm.analysis.expected_sale_price is not None:
-            fm.analysis.expected_profit = round(
-                fm.analysis.expected_sale_price
-                - price
-                - fm.analysis.expected_repairs,
-                2,
-            )
-        if fm.market.comparable_count < self.settings.minimum_comparables:
-            fm.analysis.confidence = min(fm.analysis.confidence, 0.55)
-            fm.analysis.deal_score *= 0.88
-            fm.analysis.risk_flags = list(
-                dict.fromkeys(
-                    fm.analysis.risk_flags
-                    + ["Мало сопоставимых объявлений"]
-                )
-            )
-        fm.analysis.deal_score = round(
-            max(0.0, min(100.0, fm.analysis.deal_score)),
-            1,
-        )
+        if card.snippet:
+            snippet = " ".join(card.snippet.split())
+            if len(snippet) > 150:
+                snippet = snippet[:147] + "..."
+            parts.append(snippet)
+        return " · ".join(parts)
 
     @staticmethod
     def _pre_score(market, condition) -> float:
-        discount = market.discount_pct or 0.0
+        discount = max(0.0, market.discount_pct or 0.0)
         profit = max(0.0, market.expected_profit or 0.0)
-        confidence = max(0.15, market.confidence)
+        confidence = max(0.0, market.confidence)
+        risk_factor = max(0.15, 1 - 0.65 * condition.repair_risk)
         return (
-            (discount * 100 + min(40, profit / 500))
-            * confidence
-            * (1 - 0.75 * condition.repair_risk)
-        )
+            discount * 115
+            + min(35.0, profit / 350)
+            + min(15.0, market.comparable_count * 1.5)
+        ) * confidence * risk_factor
 
     @staticmethod
     def _save_run(
